@@ -23,3 +23,112 @@
 (define-data-var performance-fee-rate uint u1000) ;; 10% performance fee
 (define-data-var treasury principal CONTRACT_OWNER)
 (define-data-var emergency-pause bool false)
+
+;; Data Maps
+(define-map vaults
+    uint
+    {
+        name: (string-ascii 64),
+        asset: principal,
+        total-shares: uint,
+        total-assets: uint,
+        strategy-id: uint,
+        risk-level: uint, ;; 1=conservative, 2=balanced, 3=aggressive
+        min-deposit: uint,
+        is-active: bool,
+        created-at: uint,
+        last-harvest: uint,
+    }
+)
+
+(define-map user-positions
+    {
+        vault-id: uint,
+        user: principal,
+    }
+    {
+        shares: uint,
+        deposited-at: uint,
+        last-compound: uint,
+        total-deposited: uint,
+        total-withdrawn: uint,
+    }
+)
+
+(define-map yield-strategies
+    uint
+    {
+        name: (string-ascii 64),
+        protocol: (string-ascii 32),
+        apy: uint, ;; APY in basis points (e.g., 1000 = 10%)
+        tvl-capacity: uint,
+        current-tvl: uint,
+        risk-score: uint, ;; 1-10 risk rating
+        is-active: bool,
+        contract-address: principal,
+        last-updated: uint,
+    }
+)
+
+(define-map vault-strategies
+    uint
+    (list 5 uint) ;; Up to 5 strategies per vault
+)
+
+(define-map user-vault-list
+    principal
+    (list 20 uint) ;; Track user's vaults
+)
+
+(define-map strategy-allocations
+    {
+        vault-id: uint,
+        strategy-id: uint,
+    }
+    uint ;; Percentage allocation (0-10000 basis points)
+)
+
+(define-map admin-roles
+    principal
+    bool
+)
+
+;; Initialize default strategies
+(map-set yield-strategies u1 {
+    name: "STX-Staking-Strategy",
+    protocol: "stx-vault",
+    apy: u1200, ;; 12% APY
+    tvl-capacity: u100000000000, ;; 100k STX capacity
+    current-tvl: u0,
+    risk-score: u3,
+    is-active: true,
+    contract-address: CONTRACT_OWNER, ;; Replace with actual staking contract
+    last-updated: stacks-block-height,
+})
+
+(map-set yield-strategies u2 {
+    name: "Lending-Protocol-Strategy",
+    protocol: "arkadiko",
+    apy: u800, ;; 8% APY
+    tvl-capacity: u50000000000, ;; 50k STX capacity
+    current-tvl: u0,
+    risk-score: u5,
+    is-active: true,
+    contract-address: CONTRACT_OWNER, ;; Replace with lending contract
+    last-updated: stacks-block-height,
+})
+
+(map-set yield-strategies u3 {
+    name: "LP-Farming-Strategy",
+    protocol: "alex",
+    apy: u1500, ;; 15% APY
+    tvl-capacity: u25000000000, ;; 25k STX capacity
+    current-tvl: u0,
+    risk-score: u7,
+    is-active: true,
+    contract-address: CONTRACT_OWNER, ;; Replace with LP contract
+    last-updated: stacks-block-height,
+})
+
+;; Set initial strategy counter
+(var-set strategy-counter u3)
