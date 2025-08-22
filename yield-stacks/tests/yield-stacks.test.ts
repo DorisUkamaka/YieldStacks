@@ -717,4 +717,354 @@ describe("YieldStacks Contract Tests", () => {
       );
     });
   });
+
+  describe("Withdrawal and Share Management", () => {
+    // Helper function to setup vault with deposits for withdrawal tests
+    const setupVaultWithDeposit = (vaultId: number, depositAmount: number) => {
+      // Create vault
+      simnet.callPublicFn(
+        contractName,
+        "create-vault",
+        [
+          Cl.stringAscii(`Withdrawal Test Vault ${vaultId}`),
+          Cl.uint(2), // Balanced risk
+          Cl.uint(1000000), // 1 STX minimum
+        ],
+        deployer
+      );
+
+      // Make deposit
+      return simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(vaultId), Cl.uint(depositAmount)],
+        wallet1
+      );
+    };
+
+    it("should allow partial withdrawal with correct asset calculation", () => {
+      const depositAmount = 10000000; // 10 STX
+      const withdrawShares = 3000000; // 3 STX worth of shares
+      
+      setupVaultWithDeposit(14, depositAmount);
+
+      // Withdraw partial shares
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(14), Cl.uint(withdrawShares)],
+        wallet1
+      );
+
+      // Should receive assets minus platform fee (0.5%)
+      const expectedFee = Math.floor((withdrawShares * 50) / 10000); // 0.5% fee
+      const expectedWithdrawal = withdrawShares - expectedFee;
+      
+      expect(result).toBeOk(Cl.uint(expectedWithdrawal));
+
+      // Verify user position was updated
+      const { result: userPosition } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-position",
+        [Cl.uint(14), Cl.principal(wallet1)],
+        deployer
+      );
+
+      expect(userPosition).toBeSome(
+        Cl.tuple({
+          shares: Cl.uint(depositAmount - withdrawShares),
+          "deposited-at": Cl.uint(simnet.blockHeight - 1),
+          "last-compound": Cl.uint(simnet.blockHeight - 1),
+          "total-deposited": Cl.uint(depositAmount),
+          "total-withdrawn": Cl.uint(expectedWithdrawal),
+        })
+      );
+    });
+
+    it("should allow full withdrawal and remove user position", () => {
+      const depositAmount = 5000000; // 5 STX
+      
+      setupVaultWithDeposit(15, depositAmount);
+
+      // Withdraw all shares
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(15), Cl.uint(depositAmount)],
+        wallet1
+      );
+
+      const expectedFee = Math.floor((depositAmount * 50) / 10000); // 0.5% fee
+      const expectedWithdrawal = depositAmount - expectedFee;
+
+      expect(result).toBeOk(Cl.uint(expectedWithdrawal));
+
+      // Verify user position was removed
+      const { result: userPosition } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-position",
+        [Cl.uint(15), Cl.principal(wallet1)],
+        deployer
+      );
+
+      expect(userPosition).toBeNone();
+
+      // Verify vault totals were updated
+      const { result: vaultInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-vault-info",
+        [Cl.uint(15)],
+        deployer
+      );
+
+      expect(vaultInfo).toBeSome(
+        Cl.tuple({
+          name: Cl.stringAscii("Withdrawal Test Vault 15"),
+          asset: Cl.principal(`${deployer}.stx-token`),
+          "total-shares": Cl.uint(0),
+          "total-assets": Cl.uint(0),
+          "strategy-id": Cl.uint(1),
+          "risk-level": Cl.uint(2),
+          "min-deposit": Cl.uint(1000000),
+          "is-active": Cl.bool(true),
+          "created-at": Cl.uint(simnet.blockHeight - 1),
+          "last-harvest": Cl.uint(simnet.blockHeight - 1),
+        })
+      );
+    });
+
+    it("should reject withdrawal of more shares than user owns", () => {
+      const depositAmount = 3000000; // 3 STX
+      
+      setupVaultWithDeposit(16, depositAmount);
+
+      // Try to withdraw more than deposited
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(16), Cl.uint(depositAmount + 1000000)], // 1 STX more than deposited
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(207)); // ERR_WITHDRAWAL_TOO_LARGE
+    });
+
+    it("should reject zero share withdrawal", () => {
+      const depositAmount = 2000000; // 2 STX
+      
+      setupVaultWithDeposit(17, depositAmount);
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(17), Cl.uint(0)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(202)); // ERR_INVALID_AMOUNT
+    });
+
+    it("should reject withdrawal from non-existent vault", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(999), Cl.uint(1000000)], // Non-existent vault
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(203)); // ERR_VAULT_NOT_FOUND
+    });
+
+    it("should reject withdrawal when user has no position", () => {
+      // Create vault but don't deposit
+      simnet.callPublicFn(
+        contractName,
+        "create-vault",
+        [
+          Cl.stringAscii("No Position Vault"),
+          Cl.uint(1),
+          Cl.uint(1000000),
+        ],
+        deployer
+      );
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(18), Cl.uint(1000000)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(201)); // ERR_INSUFFICIENT_BALANCE
+    });
+
+    it("should reject withdrawal when emergency pause is active", () => {
+      const depositAmount = 4000000; // 4 STX
+      
+      setupVaultWithDeposit(19, depositAmount);
+
+      // Activate emergency pause
+      simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(19), Cl.uint(1000000)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(205)); // ERR_VAULT_PAUSED
+
+      // Restore normal state
+      simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+    });
+
+    it("should correctly calculate and transfer platform fees", () => {
+      const depositAmount = 20000000; // 20 STX
+      const withdrawShares = 10000000; // 10 STX worth of shares
+      
+      setupVaultWithDeposit(20, depositAmount);
+
+      // Withdraw shares
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(20), Cl.uint(withdrawShares)],
+        wallet1
+      );
+
+      const expectedFee = Math.floor((withdrawShares * 50) / 10000); // 0.5% fee
+      const expectedWithdrawal = withdrawShares - expectedFee;
+
+      expect(result).toBeOk(Cl.uint(expectedWithdrawal));
+
+      // Verify the withdrawal was successful and fees were calculated correctly
+      // In a real implementation, you'd also verify treasury balance changes
+    });
+
+    it("should update global TVL after withdrawals", () => {
+      const depositAmount = 15000000; // 15 STX
+      const withdrawShares = 5000000; // 5 STX worth of shares
+      
+      setupVaultWithDeposit(21, depositAmount);
+
+      // Get initial TVL
+      const { result: initialStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      const initialTVL = (initialStats as any).value.data["total-value-locked"].value;
+
+      // Withdraw shares
+      simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(21), Cl.uint(withdrawShares)],
+        wallet1
+      );
+
+      // Check updated TVL
+      const { result: updatedStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      const newTVL = (updatedStats as any).value.data["total-value-locked"].value;
+      
+      // TVL should decrease by the full withdrawal amount (including fees)
+      expect(newTVL).toBe(initialTVL - withdrawShares);
+    });
+
+    it("should handle withdrawal when vault has earned yield", () => {
+      const depositAmount = 12000000; // 12 STX
+      
+      setupVaultWithDeposit(22, depositAmount);
+
+      // Simulate time passing and harvest vault to generate yield
+      simnet.mineEmptyBlocks(1000); // Mine many blocks to simulate time
+      
+      // Harvest to compound earnings
+      simnet.callPublicFn(
+        contractName,
+        "harvest-vault",
+        [Cl.uint(22)],
+        deployer
+      );
+
+      // Now withdraw - should get proportional share of increased vault value
+      const withdrawShares = 6000000; // Half of original shares
+      
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(22), Cl.uint(withdrawShares)],
+        wallet1
+      );
+
+      // Should be successful with some withdrawal amount
+      expect(result).toBeOk(expect.any(Object));
+    });
+
+    it("should correctly handle multiple sequential withdrawals", () => {
+      const depositAmount = 18000000; // 18 STX
+      
+      setupVaultWithDeposit(23, depositAmount);
+
+      // First withdrawal
+      const firstWithdraw = 5000000; // 5 STX worth
+      const { result: firstResult } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(23), Cl.uint(firstWithdraw)],
+        wallet1
+      );
+
+      expect(firstResult).toBeOk(expect.any(Object));
+
+      // Second withdrawal
+      const secondWithdraw = 8000000; // 8 STX worth
+      const { result: secondResult } = simnet.callPublicFn(
+        contractName,
+        "withdraw",
+        [Cl.uint(23), Cl.uint(secondWithdraw)],
+        wallet1
+      );
+
+      expect(secondResult).toBeOk(expect.any(Object));
+
+      // Verify remaining position
+      const { result: userPosition } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-position",
+        [Cl.uint(23), Cl.principal(wallet1)],
+        deployer
+      );
+
+      const remainingShares = depositAmount - firstWithdraw - secondWithdraw;
+      expect(userPosition).toBeSome(
+        Cl.tuple({
+          shares: Cl.uint(remainingShares),
+          "deposited-at": Cl.uint(simnet.blockHeight - 2),
+          "last-compound": Cl.uint(simnet.blockHeight - 2),
+          "total-deposited": Cl.uint(depositAmount),
+          "total-withdrawn": Cl.uint((firstResult as any).value + (secondResult as any).value),
+        })
+      );
+    });
+  });
 });
