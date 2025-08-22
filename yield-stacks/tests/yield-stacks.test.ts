@@ -417,4 +417,304 @@ describe("YieldStacks Contract Tests", () => {
       );
     });
   });
+
+  describe("User Deposits and Position Management", () => {
+    // Helper function to create a test vault for deposit tests
+    const createTestVault = (riskLevel: number, minDeposit: number) => {
+      return simnet.callPublicFn(
+        contractName,
+        "create-vault",
+        [
+          Cl.stringAscii(`Test Vault Risk-${riskLevel}`),
+          Cl.uint(riskLevel),
+          Cl.uint(minDeposit),
+        ],
+        deployer
+      );
+    };
+
+    it("should allow user to make first deposit and receive shares", () => {
+      // Create a test vault first
+      createTestVault(2, 1000000); // 1 STX minimum
+
+      const depositAmount = 5000000; // 5 STX
+      
+      // Make deposit
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [
+          Cl.uint(6), // Vault ID (assuming this is the 6th vault created)
+          Cl.uint(depositAmount),
+        ],
+        wallet1
+      );
+
+      // First deposit should get 1:1 share ratio
+      expect(result).toBeOk(Cl.uint(depositAmount));
+
+      // Verify user position was created
+      const { result: userPosition } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-position",
+        [Cl.uint(6), Cl.principal(wallet1)],
+        deployer
+      );
+
+      expect(userPosition).toBeSome(
+        Cl.tuple({
+          shares: Cl.uint(depositAmount),
+          "deposited-at": Cl.uint(simnet.blockHeight),
+          "last-compound": Cl.uint(simnet.blockHeight),
+          "total-deposited": Cl.uint(depositAmount),
+          "total-withdrawn": Cl.uint(0),
+        })
+      );
+
+      // Verify vault totals were updated
+      const { result: vaultInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-vault-info",
+        [Cl.uint(6)],
+        deployer
+      );
+
+      expect(vaultInfo).toBeSome(
+        Cl.tuple({
+          name: Cl.stringAscii("Test Vault Risk-2"),
+          asset: Cl.principal(`${deployer}.stx-token`),
+          "total-shares": Cl.uint(depositAmount),
+          "total-assets": Cl.uint(depositAmount),
+          "strategy-id": Cl.uint(1),
+          "risk-level": Cl.uint(2),
+          "min-deposit": Cl.uint(1000000),
+          "is-active": Cl.bool(true),
+          "created-at": Cl.uint(simnet.blockHeight),
+          "last-harvest": Cl.uint(simnet.blockHeight),
+        })
+      );
+    });
+
+    it("should calculate correct share amount for subsequent deposits", () => {
+      // Create vault and make initial deposit
+      createTestVault(1, 500000); // 0.5 STX minimum
+      
+      const firstDeposit = 10000000; // 10 STX
+      const secondDeposit = 5000000; // 5 STX
+
+      // First deposit
+      simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(7), Cl.uint(firstDeposit)],
+        wallet1
+      );
+
+      // Simulate some yield by manually advancing blocks
+      simnet.mineEmptyBlocks(100);
+
+      // Second deposit from different user
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(7), Cl.uint(secondDeposit)],
+        wallet1 // Using same wallet for simplicity in testing
+      );
+
+      // Should still get proportional shares
+      expect(result).toBeOk(Cl.uint(5000000)); // Should be close to deposit amount
+
+      // Verify total vault shares increased
+      const { result: vaultInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-vault-info",
+        [Cl.uint(7)],
+        deployer
+      );
+
+      const vaultData = vaultInfo as any;
+      expect(vaultData.value.data["total-shares"].value).toBeGreaterThan(firstDeposit);
+    });
+
+    it("should reject deposits below minimum threshold", () => {
+      createTestVault(3, 2000000); // 2 STX minimum
+
+      const tooSmallDeposit = 1000000; // 1 STX (below minimum)
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(8), Cl.uint(tooSmallDeposit)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(206)); // ERR_MINIMUM_DEPOSIT_NOT_MET
+    });
+
+    it("should reject deposits to non-existent vaults", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(999), Cl.uint(5000000)], // Non-existent vault
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(203)); // ERR_VAULT_NOT_FOUND
+    });
+
+    it("should reject deposits when emergency pause is active", () => {
+      createTestVault(1, 1000000);
+
+      // Activate emergency pause
+      simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(9), Cl.uint(5000000)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(205)); // ERR_VAULT_PAUSED
+
+      // Restore normal state
+      simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+    });
+
+    it("should update user vault list after deposit", () => {
+      createTestVault(2, 1000000);
+
+      // Make deposit
+      simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(10), Cl.uint(3000000)],
+        wallet1
+      );
+
+      // Check user's vault list
+      const { result } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-vaults",
+        [Cl.principal(wallet1)],
+        deployer
+      );
+
+      // Should contain the vault ID
+      expect(result).toBeList([Cl.uint(6), Cl.uint(7), Cl.uint(8), Cl.uint(10)]);
+    });
+
+    it("should calculate correct user vault value", () => {
+      createTestVault(1, 500000);
+
+      const depositAmount = 8000000; // 8 STX
+
+      // Make deposit
+      simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(11), Cl.uint(depositAmount)],
+        wallet1
+      );
+
+      // Check user vault value
+      const { result } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-vault-value",
+        [Cl.uint(11), Cl.principal(wallet1)],
+        deployer
+      );
+
+      // Should equal deposit amount initially (no yield yet)
+      expect(result).toBeUint(depositAmount);
+    });
+
+    it("should update global TVL after deposits", () => {
+      createTestVault(3, 1000000);
+
+      const depositAmount = 15000000; // 15 STX
+
+      // Check initial TVL
+      const { result: initialStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      const initialTVL = (initialStats as any).value.data["total-value-locked"].value;
+
+      // Make deposit
+      simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(12), Cl.uint(depositAmount)],
+        wallet1
+      );
+
+      // Check updated TVL
+      const { result: updatedStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      const newTVL = (updatedStats as any).value.data["total-value-locked"].value;
+      expect(newTVL).toBe(initialTVL + depositAmount);
+    });
+
+    it("should handle multiple deposits from same user", () => {
+      createTestVault(2, 1000000);
+
+      const firstDeposit = 3000000; // 3 STX
+      const secondDeposit = 7000000; // 7 STX
+
+      // First deposit
+      simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(13), Cl.uint(firstDeposit)],
+        wallet1
+      );
+
+      // Second deposit
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(13), Cl.uint(secondDeposit)],
+        wallet1
+      );
+
+      expect(result).toBeOk(Cl.uint(secondDeposit));
+
+      // Verify combined position
+      const { result: userPosition } = simnet.callReadOnlyFn(
+        contractName,
+        "get-user-position",
+        [Cl.uint(13), Cl.principal(wallet1)],
+        deployer
+      );
+
+      expect(userPosition).toBeSome(
+        Cl.tuple({
+          shares: Cl.uint(firstDeposit + secondDeposit),
+          "deposited-at": Cl.uint(simnet.blockHeight - 1), // From first deposit
+          "last-compound": Cl.uint(simnet.blockHeight),
+          "total-deposited": Cl.uint(firstDeposit + secondDeposit),
+          "total-withdrawn": Cl.uint(0),
+        })
+      );
+    });
+  });
 });
