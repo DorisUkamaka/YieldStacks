@@ -1067,4 +1067,438 @@ describe("YieldStacks Contract Tests", () => {
       );
     });
   });
+
+  describe("Admin Functions and Strategy Management", () => {
+    it("should allow admin to add new yield strategy", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "add-strategy",
+        [
+          Cl.stringAscii("New DeFi Strategy"),
+          Cl.stringAscii("compound"),
+          Cl.uint(2000), // 20% APY
+          Cl.uint(75000000000), // 75k STX capacity
+          Cl.uint(8), // High risk score
+          Cl.principal(deployer), // Contract address
+        ],
+        deployer
+      );
+
+      expect(result).toBeOk(Cl.uint(4)); // Should be strategy ID 4
+
+      // Verify strategy was created correctly
+      const { result: strategyInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-strategy-info",
+        [Cl.uint(4)],
+        deployer
+      );
+
+      expect(strategyInfo).toBeSome(
+        Cl.tuple({
+          name: Cl.stringAscii("New DeFi Strategy"),
+          protocol: Cl.stringAscii("compound"),
+          apy: Cl.uint(2000),
+          "tvl-capacity": Cl.uint(75000000000),
+          "current-tvl": Cl.uint(0),
+          "risk-score": Cl.uint(8),
+          "is-active": Cl.bool(true),
+          "contract-address": Cl.principal(deployer),
+          "last-updated": Cl.uint(simnet.blockHeight),
+        })
+      );
+
+      // Verify strategy counter was updated
+      const { result: platformStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      expect(platformStats).toBeOk(
+        Cl.tuple({
+          "total-value-locked": expect.any(Object),
+          "total-vaults": expect.any(Object),
+          "total-strategies": Cl.uint(4), // Should now be 4
+          "platform-fee-rate": Cl.uint(50),
+          "emergency-pause": Cl.bool(false),
+        })
+      );
+    });
+
+    it("should reject strategy creation by non-admin", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "add-strategy",
+        [
+          Cl.stringAscii("Unauthorized Strategy"),
+          Cl.stringAscii("protocol"),
+          Cl.uint(1000),
+          Cl.uint(10000000000),
+          Cl.uint(5),
+          Cl.principal(wallet1),
+        ],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(200)); // ERR_NOT_AUTHORIZED
+    });
+
+    it("should allow admin to update strategy APY", () => {
+      const newAPY = 1800; // 18% APY
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "update-strategy-apy",
+        [Cl.uint(1), Cl.uint(newAPY)],
+        deployer
+      );
+
+      expect(result).toBeOk(Cl.uint(newAPY));
+
+      // Verify the strategy was updated
+      const { result: strategyInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-strategy-info",
+        [Cl.uint(1)],
+        deployer
+      );
+
+      expect(strategyInfo).toBeSome(
+        Cl.tuple({
+          name: Cl.stringAscii("STX-Staking-Strategy"),
+          protocol: Cl.stringAscii("stx-vault"),
+          apy: Cl.uint(newAPY),
+          "tvl-capacity": Cl.uint(100000000000),
+          "current-tvl": Cl.uint(0),
+          "risk-score": Cl.uint(3),
+          "is-active": Cl.bool(true),
+          "contract-address": Cl.principal(deployer),
+          "last-updated": Cl.uint(simnet.blockHeight),
+        })
+      );
+    });
+
+    it("should reject APY update by non-admin", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "update-strategy-apy",
+        [Cl.uint(1), Cl.uint(2500)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(200)); // ERR_NOT_AUTHORIZED
+    });
+
+    it("should reject APY update for non-existent strategy", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "update-strategy-apy",
+        [Cl.uint(999), Cl.uint(1500)],
+        deployer
+      );
+
+      expect(result).toBeErr(Cl.uint(204)); // ERR_STRATEGY_NOT_FOUND
+    });
+
+    it("should allow admin to set platform fee within limits", () => {
+      const newFee = 100; // 1% fee
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "set-platform-fee",
+        [Cl.uint(newFee)],
+        deployer
+      );
+
+      expect(result).toBeOk(Cl.uint(newFee));
+
+      // Verify fee was updated
+      const { result: platformStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      expect(platformStats).toBeOk(
+        Cl.tuple({
+          "total-value-locked": expect.any(Object),
+          "total-vaults": expect.any(Object),
+          "total-strategies": expect.any(Object),
+          "platform-fee-rate": Cl.uint(newFee),
+          "emergency-pause": Cl.bool(false),
+        })
+      );
+    });
+
+    it("should reject platform fee above maximum", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "set-platform-fee",
+        [Cl.uint(1500)], // 15% - above 10% maximum
+        deployer
+      );
+
+      expect(result).toBeErr(Cl.uint(202)); // ERR_INVALID_AMOUNT
+    });
+
+    it("should reject platform fee setting by non-admin", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "set-platform-fee",
+        [Cl.uint(75)],
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(200)); // ERR_NOT_AUTHORIZED
+    });
+
+    it("should allow contract owner to add admin", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "add-admin",
+        [Cl.principal(wallet1)],
+        deployer
+      );
+
+      expect(result).toBeOk(Cl.bool(true));
+
+      // Verify wallet1 is now admin
+      const { result: isAdmin } = simnet.callReadOnlyFn(
+        contractName,
+        "is-user-admin",
+        [Cl.principal(wallet1)],
+        deployer
+      );
+
+      expect(isAdmin).toBeBool(true);
+    });
+
+    it("should reject admin addition by non-owner", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "add-admin",
+        [Cl.principal(wallet1)], // wallet1 trying to add another admin
+        wallet1
+      );
+
+      expect(result).toBeErr(Cl.uint(200)); // ERR_NOT_AUTHORIZED
+    });
+
+    it("should allow admin to toggle emergency pause", () => {
+      // Test activating pause
+      const { result: activateResult } = simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+
+      expect(activateResult).toBeOk(Cl.bool(true));
+
+      // Verify pause is active
+      const { result: pausedStats } = simnet.callReadOnlyFn(
+        contractName,
+        "get-platform-stats",
+        [],
+        deployer
+      );
+
+      expect(pausedStats).toBeOk(
+        Cl.tuple({
+          "total-value-locked": expect.any(Object),
+          "total-vaults": expect.any(Object),
+          "total-strategies": expect.any(Object),
+          "platform-fee-rate": expect.any(Object),
+          "emergency-pause": Cl.bool(true),
+        })
+      );
+
+      // Test deactivating pause
+      const { result: deactivateResult } = simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+
+      expect(deactivateResult).toBeOk(Cl.bool(false));
+    });
+
+    it("should reject emergency pause toggle by non-admin", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        wallet1 // wallet1 is not admin initially
+      );
+
+      expect(result).toBeErr(Cl.uint(200)); // ERR_NOT_AUTHORIZED
+    });
+
+    it("should allow admin to rebalance vault strategy", () => {
+      // First create a vault
+      simnet.callPublicFn(
+        contractName,
+        "create-vault",
+        [
+          Cl.stringAscii("Rebalance Test Vault"),
+          Cl.uint(2),
+          Cl.uint(1000000),
+        ],
+        deployer
+      );
+
+      // Rebalance to a different strategy
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "rebalance-vault",
+        [Cl.uint(24), Cl.uint(3)], // Assuming vault 24, change to strategy 3
+        deployer
+      );
+
+      expect(result).toBeOk(Cl.bool(true));
+
+      // Verify vault strategy was updated
+      const { result: vaultInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-vault-info",
+        [Cl.uint(24)],
+        deployer
+      );
+
+      expect(vaultInfo).toBeSome(
+        Cl.tuple({
+          name: Cl.stringAscii("Rebalance Test Vault"),
+          asset: Cl.principal(`${deployer}.stx-token`),
+          "total-shares": Cl.uint(0),
+          "total-assets": Cl.uint(0),
+          "strategy-id": Cl.uint(3), // Should be updated to strategy 3
+          "risk-level": Cl.uint(2),
+          "min-deposit": Cl.uint(1000000),
+          "is-active": Cl.bool(true),
+          "created-at": Cl.uint(simnet.blockHeight - 1),
+          "last-harvest": Cl.uint(simnet.blockHeight),
+        })
+      );
+    });
+
+    it("should reject vault rebalancing by non-admin", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "rebalance-vault",
+        [Cl.uint(24), Cl.uint(2)],
+        wallet1 // Non-admin user
+      );
+
+      expect(result).toBeErr(Cl.uint(200)); // ERR_NOT_AUTHORIZED
+    });
+
+    it("should reject rebalancing to non-existent strategy", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "rebalance-vault",
+        [Cl.uint(24), Cl.uint(999)], // Non-existent strategy
+        deployer
+      );
+
+      expect(result).toBeErr(Cl.uint(204)); // ERR_STRATEGY_NOT_FOUND
+    });
+
+    it("should reject rebalancing non-existent vault", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "rebalance-vault",
+        [Cl.uint(999), Cl.uint(2)], // Non-existent vault
+        deployer
+      );
+
+      expect(result).toBeErr(Cl.uint(203)); // ERR_VAULT_NOT_FOUND
+    });
+
+    it("should allow admin to harvest vault earnings", () => {
+      // Create vault with deposit
+      simnet.callPublicFn(
+        contractName,
+        "create-vault",
+        [
+          Cl.stringAscii("Harvest Test Vault"),
+          Cl.uint(2),
+          Cl.uint(1000000),
+        ],
+        deployer
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "deposit",
+        [Cl.uint(25), Cl.uint(10000000)], // 10 STX
+        wallet1
+      );
+
+      // Mine blocks to simulate time passing
+      simnet.mineEmptyBlocks(500);
+
+      // Harvest the vault
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "harvest-vault",
+        [Cl.uint(25)],
+        deployer
+      );
+
+      expect(result).toBeOk(Cl.bool(true));
+
+      // Verify harvest updated the vault's last-harvest timestamp
+      const { result: vaultInfo } = simnet.callReadOnlyFn(
+        contractName,
+        "get-vault-info",
+        [Cl.uint(25)],
+        deployer
+      );
+
+      const vaultData = vaultInfo as any;
+      expect(vaultData.value.data["last-harvest"].value).toBe(simnet.blockHeight);
+    });
+
+    it("should reject vault harvesting when emergency pause is active", () => {
+      // Activate emergency pause
+      simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "harvest-vault",
+        [Cl.uint(25)],
+        deployer
+      );
+
+      expect(result).toBeErr(Cl.uint(205)); // ERR_VAULT_PAUSED
+
+      // Restore normal state
+      simnet.callPublicFn(
+        contractName,
+        "toggle-emergency-pause",
+        [],
+        deployer
+      );
+    });
+
+    it("should reject harvesting non-existent vault", () => {
+      const { result } = simnet.callPublicFn(
+        contractName,
+        "harvest-vault",
+        [Cl.uint(999)],
+        deployer
+      );
+
+      expect(result).toBeErr(Cl.uint(203)); // ERR_VAULT_NOT_FOUND
+    });
+  });
 });
